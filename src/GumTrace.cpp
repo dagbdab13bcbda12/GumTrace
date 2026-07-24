@@ -118,7 +118,7 @@ void GumTrace::dump_memory(uint64_t line_number, const char *access_type,
               << std::hex << address << ":\n";
     if (bytes != nullptr && bytes_read > 0) {
         for (size_t offset = 0; offset < bytes_read; offset += 16) {
-            append_dump_row(dump_file, address + offset, bytes,
+            append_dump_row(dump_file, address + offset, bytes + offset,
                             std::min<size_t>(16, bytes_read - offset));
         }
     }
