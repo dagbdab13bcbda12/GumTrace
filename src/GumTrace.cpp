@@ -28,14 +28,19 @@ JNIEnv *GumTrace::get_run_time_env() {
         return nullptr;
     }
 
-    if (jni_env == nullptr) {
-        java_vm->GetEnv((void**)&jni_env, JNI_VERSION_1_6);
+    JNIEnv *env = nullptr;
+    jint env_status = java_vm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (env_status == JNI_EDETACHED) {
+        if (java_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+            return nullptr;
+        }
+    } else if (env_status != JNI_OK || env == nullptr) {
+        return nullptr;
     }
 
-    if (jni_env != nullptr && jni_env_init == false) {
-        jni_env_init = true;
-
-        auto jni_func_table = (uint64_t)jni_env->functions;
+    std::lock_guard<std::mutex> lock(jni_env_mutex);
+    if (jni_env_init == false) {
+        auto jni_func_table = (uint64_t)env->functions;
         int index = 0;
         for (const auto &func_name: jni_func_names) {
             auto func_addr_ptr = (void **)(jni_func_table + index * sizeof(void *));
@@ -43,8 +48,9 @@ JNIEnv *GumTrace::get_run_time_env() {
             jni_func_maps[func_addr] = func_name;
             index++;
         }
+        jni_env_init = true;
     }
-    return jni_env;
+    return env;
 }
 
 #endif
@@ -107,6 +113,8 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
         self->trace_file.write(self->last_func_context.info, self->last_func_context.info_n);
     }
 
+    Utils::auto_snprintf(buff_n, buff, "%llu ",
+                         (unsigned long long)self->trace_line_number++);
     Utils::append_char(buff, buff_n, '[');
     Utils::append_string(buff, buff_n, callback_ctx->module_name);
     Utils::append_string(buff, buff_n, "] 0x");

@@ -142,6 +142,7 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
     memcpy(instance->trace_file_path, trace_file_path, path_len);
     instance->trace_file_path[path_len] = '\0';
     instance->trace_thread_id = thread_id;
+    instance->trace_line_number = 1;
     instance->trace_file = std::ofstream(instance->trace_file_path, std::ios::out | std::ios::trunc);
 
     for (const auto& svc_name : svc_names) {

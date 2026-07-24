@@ -7,6 +7,7 @@
 
 #include "Utils.h"
 #include "CallbackContext.h"
+#include <mutex>
 
 struct REG_LIST {
     int num = 0;
@@ -51,6 +52,7 @@ public:
     std::ofstream trace_file;
     int trace_thread_id;
     int trace_flush = 0;
+    uint64_t trace_line_number = 1;
     std::unordered_map<size_t, std::string> func_maps;
     FUNC_CONTEXT last_func_context = {};
 
@@ -93,8 +95,8 @@ public:
 
 
     JavaVM *java_vm = nullptr;
-    JNIEnv *jni_env = nullptr;
     bool jni_env_init = false;
+    std::mutex jni_env_mutex;
     std::unordered_map<size_t, std::string> jni_func_maps;
     std::unordered_map<size_t, std::string> jni_classes;
     std::unordered_map<size_t, std::string> jni_methods;

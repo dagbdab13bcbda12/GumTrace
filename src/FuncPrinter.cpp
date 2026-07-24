@@ -428,6 +428,7 @@ void FuncPrinter::jni_before(FUNC_CONTEXT *func_context) {
 
 void FuncPrinter::jni_after(FUNC_CONTEXT *func_context, GumCpuContext *curr_cpu_context) {
     auto instance = GumTrace::get_instance();
+    JNIEnv *env = instance->get_run_time_env();
     Utils::auto_snprintf(func_context->info_n, func_context->info, "call jni func: %s", func_context->name);
 
     auto it = after_jni_func_configs.find(func_context->name);
@@ -438,19 +439,25 @@ void FuncPrinter::jni_after(FUNC_CONTEXT *func_context, GumCpuContext *curr_cpu_
         params_join(func_context, config.params_number);
 
         for (int reg_index: config.jni_string_indices) {
+            if (env == nullptr) continue;
             auto jstr = (jstring)(func_context->cpu_context.x[reg_index]);
-            const char *cstr = instance->jni_env->GetStringUTFChars(jstr, nullptr);
+            if (jstr == nullptr) continue;
+            const char *cstr = env->GetStringUTFChars(jstr, nullptr);
+            if (cstr == nullptr) continue;
             Utils::auto_snprintf(func_context->info_n, func_context->info, "\nargs%d: ", reg_index);
             read_string(func_context->info_n, func_context->info, (char*)cstr);
-            instance->jni_env->ReleaseStringUTFChars(jstr, cstr);
+            env->ReleaseStringUTFChars(jstr, cstr);
         }
 
         for (int reg_index: config.curr_jni_string_indices) {
+            if (env == nullptr) continue;
             auto jstr = (jstring)(curr_cpu_context->x[reg_index]);
-            const char *cstr = instance->jni_env->GetStringUTFChars(jstr, nullptr);
+            if (jstr == nullptr) continue;
+            const char *cstr = env->GetStringUTFChars(jstr, nullptr);
+            if (cstr == nullptr) continue;
             Utils::auto_snprintf(func_context->info_n, func_context->info, "\nargs%d: ", reg_index);
             read_string(func_context->info_n, func_context->info, (char*)cstr);
-            instance->jni_env->ReleaseStringUTFChars(jstr, cstr);
+            env->ReleaseStringUTFChars(jstr, cstr);
         }
 
         for (int reg_index : config.string_indices) {

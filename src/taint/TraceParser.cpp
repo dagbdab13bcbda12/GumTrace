@@ -349,8 +349,28 @@ InsnCategory TraceParser::classify_mnemonic(const char* m, int len) {
 // 行类型检测
 // ============================================================
 
+static int find_instruction_start(const char* buf, int len) {
+    int i = 0;
+
+    // 新格式：102 [module]
+    if (i < len && buf[i] >= '0' && buf[i] <= '9') {
+        while (i < len && buf[i] >= '0' && buf[i] <= '9') i++;
+    // 兼容旧格式：[102] [module]
+    } else if (i < len && buf[i] == '[') {
+        int close = i + 1;
+        while (close < len && buf[close] >= '0' && buf[close] <= '9') close++;
+        if (close > i + 1 && close < len && buf[close] == ']') i = close + 1;
+    }
+
+    while (i < len && (buf[i] == ' ' || buf[i] == '\t')) i++;
+    return i;
+}
+
 bool TraceParser::is_instruction_line(const char* buf, int len) {
-    return len > 0 && buf[0] == '[';
+    if (len <= 0) return false;
+
+    int i = find_instruction_start(buf, len);
+    return i < len && buf[i] == '[';
 }
 
 // ============================================================
@@ -541,8 +561,10 @@ bool TraceParser::parse_line(const char* buf, int len, int line_number, long off
     out.file_offset = offset;
     out.line_len = len;
 
-    // 跳过 [module]
-    int i = 1;
+    // 跳过可选的指令序号和 [module]
+    int i = find_instruction_start(buf, len);
+    if (i >= len || buf[i] != '[') return false;
+    i++;
     while (i < len && buf[i] != ']') i++;
     if (i >= len) return false;
     i++; // skip ']'
