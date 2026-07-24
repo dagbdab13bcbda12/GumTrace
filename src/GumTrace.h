@@ -7,6 +7,7 @@
 
 #include "Utils.h"
 #include "CallbackContext.h"
+#include <atomic>
 #include <mutex>
 
 struct REG_LIST {
@@ -50,9 +51,11 @@ public:
     std::map<std::string, std::map<std::string, std::size_t>> modules;
     char trace_file_path[256];
     std::ofstream trace_file;
+    std::ofstream dump_file;
+    std::mutex dump_file_mutex;
     int trace_thread_id;
     int trace_flush = 0;
-    uint64_t trace_line_number = 1;
+    std::atomic<uint64_t> trace_line_number{1};
     std::unordered_map<size_t, std::string> func_maps;
     FUNC_CONTEXT last_func_context = {};
 
@@ -69,6 +72,7 @@ public:
     void unfollow();
 
     static void callout_callback(GumCpuContext *cpu_context, gpointer user_data);
+    void dump_memory(uint64_t line_number, const char *access_type, uintptr_t address);
 
     char buffer[BUFFER_SIZE] = {};
     int buffer_offset = 0;

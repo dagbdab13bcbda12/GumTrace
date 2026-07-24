@@ -142,8 +142,20 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
     memcpy(instance->trace_file_path, trace_file_path, path_len);
     instance->trace_file_path[path_len] = '\0';
     instance->trace_thread_id = thread_id;
-    instance->trace_line_number = 1;
+    instance->trace_line_number.store(1);
+    {
+        std::lock_guard<std::mutex> dump_lock(instance->dump_file_mutex);
+        if (instance->dump_file.is_open()) {
+            instance->dump_file.close();
+        }
+        instance->dump_file = std::ofstream(
+            std::string(instance->trace_file_path) + "_dump.log",
+            std::ios::out | std::ios::trunc);
+    }
     instance->trace_file = std::ofstream(instance->trace_file_path, std::ios::out | std::ios::trunc);
+    if (!instance->dump_file.is_open()) {
+        LOGE("failed to open memory dump file: %s_dump.log", instance->trace_file_path);
+    }
 
     for (const auto& svc_name : svc_names) {
         auto svc_name_vector = Utils::str_split(svc_name, ' ');

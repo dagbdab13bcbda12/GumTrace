@@ -5,6 +5,41 @@
 #include "GumTrace.h"
 #include "Utils.h"
 #include "FuncPrinter.h"
+#include <algorithm>
+#include <cctype>
+#include <iomanip>
+#include <sstream>
+
+namespace {
+
+constexpr size_t MEMORY_DUMP_SIZE = 512;
+
+struct DumpPageState {
+    uintptr_t address;
+    GumPageProtection protection;
+    bool changed;
+};
+
+void append_dump_row(std::ofstream &file, uintptr_t address,
+                     const guint8 *bytes, size_t count) {
+    file << std::hex << address << "  ";
+    for (size_t i = 0; i < 16; i++) {
+        if (i < count) {
+            file << std::setw(2) << std::setfill('0')
+                 << static_cast<unsigned int>(bytes[i]) << ' ';
+        } else {
+            file << "   ";
+        }
+    }
+    file << " ";
+    for (size_t i = 0; i < count; i++) {
+        const unsigned char c = bytes[i];
+        file << (std::isprint(c) ? static_cast<char>(c) : '.');
+    }
+    file << '\n';
+}
+
+} // namespace
 
 GumTrace *GumTrace::get_instance() {
     static GumTrace instance;
@@ -19,6 +54,91 @@ GumTrace::GumTrace() {
 GumTrace::~GumTrace() {
     if (_stalker) g_object_unref(_stalker);
     if (_transformer) g_object_unref(_transformer);
+    {
+        std::lock_guard<std::mutex> lock(dump_file_mutex);
+        if (dump_file.is_open()) dump_file.close();
+    }
+}
+
+void GumTrace::dump_memory(uint64_t line_number, const char *access_type,
+                           uintptr_t address) {
+    std::lock_guard<std::mutex> lock(dump_file_mutex);
+    if (!dump_file.is_open()) return;
+
+    const uintptr_t page_size = gum_query_page_size();
+    if (page_size == 0 || address > UINTPTR_MAX - MEMORY_DUMP_SIZE) {
+        dump_file << std::dec << line_number << " " << access_type << "=0x"
+                  << std::hex << address << ":\n"
+                  << "memory read exception: invalid address range\n";
+        dump_file.flush();
+        return;
+    }
+
+    const uintptr_t end_address = address + MEMORY_DUMP_SIZE;
+    const uintptr_t first_page = address & ~(page_size - 1);
+    const uintptr_t last_page = (end_address - 1) & ~(page_size - 1);
+    std::vector<DumpPageState> pages;
+    std::string preparation_error;
+
+    for (uintptr_t page = first_page;; page += page_size) {
+        GumPageProtection protection = GUM_PAGE_NO_ACCESS;
+        if (!gum_memory_query_protection(reinterpret_cast<gpointer>(page), &protection)) {
+            std::ostringstream error;
+            error << "page protection query failed at 0x" << std::hex << page;
+            preparation_error = error.str();
+            break;
+        }
+
+        bool changed = false;
+        if ((protection & GUM_PAGE_READ) == 0) {
+            if (!gum_try_mprotect(reinterpret_cast<gpointer>(page), page_size,
+                                  protection | GUM_PAGE_READ)) {
+                std::ostringstream error;
+                error << "unable to add read permission at 0x" << std::hex << page;
+                preparation_error = error.str();
+                break;
+            }
+            changed = true;
+        }
+        pages.push_back({page, protection, changed});
+
+        if (page == last_page) break;
+        if (page > UINTPTR_MAX - page_size) {
+            preparation_error = "page range overflow";
+            break;
+        }
+    }
+
+    gsize bytes_read = 0;
+    guint8 *bytes = nullptr;
+    bytes = gum_memory_read(reinterpret_cast<gconstpointer>(address),
+                            MEMORY_DUMP_SIZE, &bytes_read);
+
+    dump_file << std::dec << line_number << " " << access_type << "=0x"
+              << std::hex << address << ":\n";
+    if (bytes != nullptr && bytes_read > 0) {
+        for (size_t offset = 0; offset < bytes_read; offset += 16) {
+            append_dump_row(dump_file, address + offset, bytes,
+                            std::min<size_t>(16, bytes_read - offset));
+        }
+    }
+
+    if (!preparation_error.empty()) {
+        dump_file << preparation_error << '\n';
+    }
+    if (bytes == nullptr || bytes_read < MEMORY_DUMP_SIZE) {
+        dump_file << "memory read exception: read " << std::dec << bytes_read
+                  << " of " << MEMORY_DUMP_SIZE << " bytes\n";
+    }
+
+    if (bytes != nullptr) g_free(bytes);
+    for (auto it = pages.rbegin(); it != pages.rend(); ++it) {
+        if (it->changed) {
+            gum_try_mprotect(reinterpret_cast<gpointer>(it->address), page_size,
+                             it->protection);
+        }
+    }
+    dump_file.flush();
 }
 
 #if PLATFORM_ANDROID
@@ -113,8 +233,9 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
         self->trace_file.write(self->last_func_context.info, self->last_func_context.info_n);
     }
 
+    const uint64_t trace_line_number = self->trace_line_number.fetch_add(1);
     Utils::auto_snprintf(buff_n, buff, "%llu ",
-                         (unsigned long long)self->trace_line_number++);
+                         (unsigned long long)trace_line_number);
     Utils::append_char(buff, buff_n, '[');
     Utils::append_string(buff, buff_n, callback_ctx->module_name);
     Utils::append_string(buff, buff_n, "] 0x");
@@ -128,7 +249,6 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
     Utils::append_string(buff, buff_n, "; ");
 
     bool is_write = false;
-    uintptr_t mem_r_addr = 0x0;
     for (int i = 0; i < callback_ctx->instruction_detail.arm64.op_count; i++) {
         cs_arm64_op &op = callback_ctx->instruction_detail.arm64.operands[i];
         __uint128_t reg_value = 0;
@@ -181,6 +301,9 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
                 Utils::append_string(buff, buff_n, callback_ctx->instruction.mnemonic[0] == 'l' ? "mem_r=0x" : "mem_w=0x");
                 Utils::append_uint64_hex(buff, buff_n, write_address);
                 Utils::append_char(buff, buff_n, ' ');
+                self->dump_memory(trace_line_number,
+                                  callback_ctx->instruction.mnemonic[0] == 'l' ? "mem_r" : "mem_w",
+                                  write_address);
             }
 
             if (strstr(callback_ctx->instruction.op_str, "],") || strstr(callback_ctx->instruction.op_str, "]!")) {
@@ -216,6 +339,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
                 Utils::append_string(buff, buff_n, "mem_w=0x");
                 Utils::append_uint64_hex(buff, buff_n, write_address);
                 Utils::append_char(buff, buff_n, ' ');
+                self->dump_memory(trace_line_number, "mem_w", write_address);
             }
         } else if ((op.access & CS_AC_READ) && op.type == ARM64_OP_MEM) {
             __uint128_t base = 0;
@@ -241,10 +365,10 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
             if (flag) {
                 uintptr_t shifted_index = Utils::apply_shift(index, op.shift.type, op.shift.value);
                 uintptr_t read_address = base + shifted_index + op.mem.disp;
-                mem_r_addr = read_address;
                 Utils::append_string(buff, buff_n, "mem_r=0x");
                 Utils::append_uint64_hex(buff, buff_n, read_address);
                 Utils::append_char(buff, buff_n, ' ');
+                self->dump_memory(trace_line_number, "mem_r", read_address);
             }
         } else if (op.access & CS_AC_WRITE && op.type == ARM64_OP_REG) {
             if (Utils::get_register_value(op.reg, cpu_context, reg_value)) {
@@ -430,5 +554,13 @@ void GumTrace::unfollow() {
         buffer_offset = 0;
         trace_file.flush();
         trace_file.close();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(dump_file_mutex);
+        if (dump_file.is_open()) {
+            dump_file.flush();
+            dump_file.close();
+        }
     }
 }
